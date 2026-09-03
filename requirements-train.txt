@@ -1,0 +1,5 @@
+-r requirements.txt
+transformers==4.57.5
+safetensors==0.6.2
+tqdm==4.67.1
+
