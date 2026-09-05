@@ -96,6 +96,7 @@ class SegmentationDataset(Dataset):
         color_jitter: float = 0.2,
         rare_class_ids: Sequence[int] = (5, 7, 8),
         rare_crop_probability: float = 0.5,
+        crop_strategy: str = "legacy",
     ) -> None:
         self.samples = list(samples)
         self.crop_size = crop_size
@@ -105,6 +106,13 @@ class SegmentationDataset(Dataset):
         self.color_jitter = color_jitter
         self.rare_class_ids = tuple(rare_class_ids)
         self.rare_crop_probability = rare_crop_probability
+        if crop_strategy not in ("legacy", "targeted"):
+            raise ValueError("crop_strategy must be legacy or targeted")
+        if not 0 <= rare_crop_probability <= 1:
+            raise ValueError("rare_crop_probability must be in [0,1]")
+        if crop_size <= 0:
+            raise ValueError("crop_size must be positive")
+        self.crop_strategy = crop_strategy
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -122,10 +130,20 @@ class SegmentationDataset(Dataset):
     def _random_crop(
         self, image: Image.Image, mask: Image.Image
     ) -> tuple[Image.Image, Image.Image]:
+        cropped_image, cropped_mask, _ = self.crop_with_info(image, mask)
+        return cropped_image, cropped_mask
+
+    def crop_with_info(self, image: Image.Image, mask: Image.Image):
+        """Return aligned crops and diagnostic metadata; no change to image sampling."""
         width, height = image.size
+        if image.size != mask.size or min(width, height) < self.crop_size:
+            raise ValueError("Aligned image/mask must be at least crop_size before cropping")
+        if self.crop_strategy == "targeted":
+            return self._targeted_crop(image, mask)
+        # Preserve the legacy random draw order and acceptance/fallback rule exactly.
         attempts = 8 if random.random() < self.rare_crop_probability else 1
         selected_box = None
-        for _ in range(attempts):
+        for attempt in range(attempts):
             left = random.randint(0, width - self.crop_size)
             top = random.randint(0, height - self.crop_size)
             box = (left, top, left + self.crop_size, top + self.crop_size)
@@ -136,7 +154,45 @@ class SegmentationDataset(Dataset):
             if np.isin(crop, self.rare_class_ids).mean() >= 0.005:
                 break
         assert selected_box is not None
-        return image.crop(selected_box), mask.crop(selected_box)
+        return image.crop(selected_box), mask.crop(selected_box), {
+            "branch": "legacy_rare" if attempts == 8 else "random",
+            "target_class": -1, "attempts": attempt + 1, "box": selected_box,
+        }
+
+    def _targeted_crop(self, image: Image.Image, mask: Image.Image):
+        width, height = image.size
+        size = self.crop_size
+        target = -1
+        branch = "random"
+        if random.random() < self.rare_crop_probability:
+            values = np.asarray(mask)
+            present = [class_id for class_id in self.rare_class_ids if (values == class_id).any()]
+            if present:
+                target = random.choice(present)  # Equal probability per present class, not per pixel.
+                branch = "targeted"
+            else:
+                branch = "no_target_fallback"
+        if target == -1:
+            left, top = random.randint(0, width - size), random.randint(0, height - size)
+            box = (left, top, left + size, top + size)
+            return image.crop(box), mask.crop(box), dict(
+                branch=branch, target_class=-1, attempts=1, box=box)
+        positions = np.flatnonzero(values == target)
+        best_count, best_box = -1, None
+        for attempt in range(8):
+            y, x = divmod(int(positions[random.randrange(len(positions))]), width)
+            # All valid origins that contain the sampled pixel; do not always center it.
+            left = random.randint(max(0, x - size + 1), min(x, width - size))
+            top = random.randint(max(0, y - size + 1), min(y, height - size))
+            box = (left, top, left + size, top + size)
+            count = int((values[top:top + size, left:left + size] == target).sum())
+            if count > best_count:
+                best_count, best_box = count, box
+            if count / (size * size) >= 0.005:
+                break
+        return image.crop(best_box), mask.crop(best_box), dict(
+            branch=branch, target_class=target, attempts=attempt + 1, box=best_box,
+            target_pixels=best_count, threshold_met=best_count / (size * size) >= 0.005)
 
     def _photometric(self, image: Image.Image) -> Image.Image:
         jitter = self.color_jitter

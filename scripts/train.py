@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-max", type=float, default=1.5)
     parser.add_argument("--color-jitter", type=float, default=0.2)
     parser.add_argument("--rare-crop-probability", type=float, default=0.5)
+    parser.add_argument("--crop-strategy", choices=("legacy", "targeted"), default="legacy")
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--resume", default=None)
@@ -138,6 +139,11 @@ def validate_resume_args(current: argparse.Namespace, previous: dict[str, object
         for key in keys
         if key in previous and getattr(current, key) != previous[key]
     ]
+    if getattr(current, "crop_strategy", "legacy") != previous.get("crop_strategy", "legacy"):
+        mismatches.append("crop_strategy")
+    for key in ("rare_crop_probability", "scale_min", "scale_max", "color_jitter"):
+        if key in previous and getattr(current, key) != previous[key]:
+            mismatches.append(key)
     if mismatches:
         raise ValueError(
             "Resume arguments differ from the checkpoint: " + ", ".join(mismatches)
@@ -209,6 +215,7 @@ def main() -> None:
         scale_range=(args.scale_min, args.scale_max),
         color_jitter=args.color_jitter,
         rare_crop_probability=args.rare_crop_probability,
+        crop_strategy=args.crop_strategy,
     )
     val_data = SegmentationDataset(
         val_samples,
