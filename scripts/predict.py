@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from uavseg.data import IMAGENET_MEAN, IMAGENET_STD, indexed_files
-from uavseg.model import BoundaryAwareSegFormer
+from uavseg.model import model_from_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--images", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--dinov3-source",
+        default=None,
+        help="Override the official DINOv3 source checkout stored in a B-line checkpoint",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--no-amp", action="store_true")
     return parser.parse_args()
@@ -34,7 +39,9 @@ def main() -> None:
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
     amp = device.type == "cuda" and not args.no_amp
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    model = BoundaryAwareSegFormer.from_model_config(checkpoint["model_config"])
+    model = model_from_config(
+        checkpoint["model_config"], dinov3_source=args.dinov3_source
+    )
     model.load_state_dict(checkpoint["model"])
     model.to(device).eval()
 
@@ -61,7 +68,7 @@ def main() -> None:
                 align_corners=False,
             )
             prediction = logits.argmax(dim=1)[0].to(torch.uint8).cpu().numpy()
-        Image.fromarray(prediction, mode="L").save(output / path.name)
+        Image.fromarray(prediction).save(output / path.name)
 
 
 if __name__ == "__main__":

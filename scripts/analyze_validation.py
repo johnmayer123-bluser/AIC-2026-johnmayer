@@ -1,4 +1,4 @@
-"""Read-only A00 validation diagnostics; no training, downloads, or split generation."""
+"""Read-only validation diagnostics; no training, downloads, or split generation."""
 from __future__ import annotations
 
 import argparse
@@ -120,6 +120,11 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("images", "masks", "split", "checkpoint", "output"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument(
+        "--dinov3-source",
+        default=None,
+        help="Override the official DINOv3 source checkout stored in a B-line checkpoint",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--limit", type=int, default=0, help="First N validation images; 0 = full split")
@@ -131,7 +136,7 @@ def parse_args(argv=None):
 
 
 def run(args):
-    from uavseg.model import BoundaryAwareSegFormer
+    from uavseg.model import model_from_config
     import transformers
 
     started = time.perf_counter()
@@ -156,8 +161,10 @@ def run(args):
     torch.manual_seed(3407)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if checkpoint["model_config"]["num_classes"] != 9 or checkpoint.get("args", {}).get("ignore_index", 0) != 0:
-        raise ValueError("This A00 diagnostic requires 9 classes and ignore_index=0")
-    model = BoundaryAwareSegFormer.from_model_config(checkpoint["model_config"])
+        raise ValueError("Validation diagnostics require 9 classes and ignore_index=0")
+    model = model_from_config(
+        checkpoint["model_config"], dinov3_source=args.dinov3_source
+    )
     model.load_state_dict(checkpoint["model"], strict=True)
     model.to(device).eval()
     reference_miou = checkpoint.get("best_miou")

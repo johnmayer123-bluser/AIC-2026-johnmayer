@@ -26,17 +26,44 @@ from uavseg.data import (
 )
 from uavseg.losses import SegmentationLoss
 from uavseg.metrics import confusion_matrix, iou_from_confusion
-from uavseg.model import BoundaryAwareSegFormer
+from uavseg.model import (
+    DINOV3_VARIANTS,
+    BoundaryAwareSegFormer,
+    DinoV3BoundarySegmenter,
+    model_from_config,
+    parse_dinov3_blocks,
+)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train one boundary-aware SegFormer model.")
+    parser = argparse.ArgumentParser(description="Train one single-model UAV segmenter.")
     parser.add_argument("--images", required=True)
     parser.add_argument("--masks", required=True)
     parser.add_argument("--split", default=None, help="split.json from tools/profile_dataset.py")
     parser.add_argument("--class-weights", default=None, help="class_weights.json from profiling")
     parser.add_argument("--output", default="outputs/a00_b2_boundary")
+    parser.add_argument(
+        "--architecture",
+        choices=("segformer", "dinov3"),
+        default="segformer",
+        help="Single encoder family; existing commands remain SegFormer by default",
+    )
     parser.add_argument("--model", default="nvidia/mit-b2")
+    parser.add_argument(
+        "--dinov3-source",
+        default=None,
+        help="Pinned checkout of the official facebookresearch/dinov3 repository",
+    )
+    parser.add_argument(
+        "--dinov3-variant",
+        choices=tuple(DINOV3_VARIANTS),
+        default="vits16plus",
+    )
+    parser.add_argument(
+        "--dinov3-blocks",
+        default=None,
+        help="Four increasing zero-based block indices, e.g. 2,5,8,11",
+    )
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation", type=int, default=4)
@@ -141,6 +168,23 @@ def validate_resume_args(current: argparse.Namespace, previous: dict[str, object
     ]
     if getattr(current, "crop_strategy", "legacy") != previous.get("crop_strategy", "legacy"):
         mismatches.append("crop_strategy")
+    current_architecture = getattr(current, "architecture", "segformer")
+    if current_architecture != previous.get("architecture", "segformer"):
+        mismatches.append("architecture")
+    if current_architecture == "dinov3":
+        current_variant = getattr(current, "dinov3_variant", "vits16plus")
+        previous_variant = previous.get("dinov3_variant", "vits16plus")
+        if current_variant != previous_variant:
+            mismatches.append("dinov3_variant")
+        elif "dinov3_blocks" in previous:
+            current_blocks = parse_dinov3_blocks(
+                getattr(current, "dinov3_blocks", None), current_variant
+            )
+            previous_blocks = parse_dinov3_blocks(
+                previous.get("dinov3_blocks"), str(previous_variant)
+            )
+            if current_blocks != previous_blocks:
+                mismatches.append("dinov3_blocks")
     for key in ("rare_crop_probability", "scale_min", "scale_max", "color_jitter"):
         if key in previous and getattr(current, key) != previous[key]:
             mismatches.append(key)
@@ -152,7 +196,7 @@ def validate_resume_args(current: argparse.Namespace, previous: dict[str, object
 
 @torch.no_grad()
 def validate(
-    model: BoundaryAwareSegFormer,
+    model: torch.nn.Module,
     loader: DataLoader,
     criterion: SegmentationLoss,
     device: torch.device,
@@ -241,8 +285,23 @@ def main() -> None:
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         validate_resume_args(args, checkpoint.get("args", {}))
-        model = BoundaryAwareSegFormer.from_model_config(checkpoint["model_config"])
+        model = model_from_config(
+            checkpoint["model_config"], dinov3_source=args.dinov3_source
+        )
         model.load_state_dict(checkpoint["model"])
+    elif args.architecture == "dinov3":
+        if not args.dinov3_source:
+            raise ValueError("--dinov3-source is required for a fresh DINOv3 run")
+        model = DinoV3BoundarySegmenter.from_pretrained(
+            args.model,
+            dinov3_source=args.dinov3_source,
+            variant=args.dinov3_variant,
+            feature_blocks=parse_dinov3_blocks(
+                args.dinov3_blocks, args.dinov3_variant
+            ),
+            num_classes=args.num_classes,
+            decoder_channels=args.decoder_channels,
+        )
     else:
         model = BoundaryAwareSegFormer.from_pretrained(
             args.model,
@@ -255,8 +314,8 @@ def main() -> None:
         checkpointing_enabled = model.gradient_checkpointing_enable()
         if not checkpointing_enabled:
             print(
-                "WARNING: this Transformers SegFormer version does not support gradient "
-                "checkpointing; continuing without it"
+                "WARNING: this encoder does not expose supported gradient checkpointing; "
+                "continuing without it"
             )
     model.to(device)
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
@@ -271,6 +330,9 @@ def main() -> None:
         "parameter_count": parameter_count,
         "trainable_parameter_count": trainable_count,
         "gradient_checkpointing": checkpointing_enabled,
+        "architecture": model.export_config().get("architecture"),
+        "pretrained_sha256": getattr(model, "pretrained_sha256", None),
+        "dinov3_source_revision": getattr(model, "source_revision", None),
     }
     (output / "runtime.json").write_text(
         json.dumps(run_info, ensure_ascii=False, indent=2), encoding="utf-8"

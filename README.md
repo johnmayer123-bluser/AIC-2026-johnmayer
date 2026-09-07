@@ -26,7 +26,9 @@
 
 ## 2. 模型方案
 
-主模型为单个 **Boundary-Aware SegFormer-B2（BA-SegFormer-B2）**。
+当前官方测试集1最高分模型仍为单个 **Boundary-Aware SegFormer-B2
+（BA-SegFormer-B2）**。2026-09-07新增独立B线DINOv3候选；B线尚未正式训练，不能
+表述为已经优于A线。
 
 ### 2.1 网络结构
 
@@ -64,6 +66,22 @@ L = Weighted Cross Entropy + 0.3 * Soft Dice + 0.1 * Balanced Boundary BCE
 - 高斯模糊概率：`0.15`，半径 `0.1-1.2`。
 - 类别感知裁剪概率：`0.5`；优先选择至少含 `0.5%` 荒地、农田或车辆像素的 crop，最多尝试 8 次。
 - ImageNet 均值和标准差归一化。
+
+### 2.4 B线：DINOv3 ViT-S+/16候选
+
+B00使用公开学术权重`dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth`作为单个
+编码器，从block 2/5/8/11提取Token特征，恢复为1/16二维特征图，并与一个真实1/4
+分辨率的轻量RGB细节支路融合。融合结果继续使用本项目的边界门控局部细化和单个9类
+分类头，因此最终推理仍是一个模型，不包含A线模型、集成、权重平均、预测平均或TTA。
+
+B00沿用A03 scene-guard代理划分、train-only类别权重、legacy裁剪、现有增强以及
+`CE + 0.3 Dice + 0.1 Boundary BCE`。A04官方成绩表明直接关闭边界损失会从
+0.664582降至0.661388，因此首次DINOv3实验不同时改边界损失。
+
+实现位于`src/uavseg/model.py`，训练/恢复、验证诊断和预测脚本均可根据检查点中的
+`architecture`字段重建A线或B线模型。完整源码版本、权重哈希、服务器路径、冒烟、
+正式训练、验证和提交命令见`docs/B00_DINOV3_GUIDE.md`。正式采用前仍需向组委会确认
+LVD-1689M公开预训练权重的合规性。
 
 验证和测试不使用随机增强；验证使用完整 `1024x1024` 图像。
 
