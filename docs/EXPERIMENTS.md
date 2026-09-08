@@ -407,16 +407,31 @@ echo $! | tee outputs/a00_b2_boundary_pro6000/train.pid
 - 不加载A00 MiT权重，不从B00续训；从同一DINOv3公开权重重新初始化。
 - B01与B00验证口径不同，不能用验证分数直接声称改进；主要提供官方数据-only对照。
 
-### C00 - LoveDA两阶段迁移（研究专用，代码就绪）
+### C00 - LoveDA预适配后AIC微调（完成，官方成绩待登记）
 
-- LoveDA属于比赛禁止的外部训练数据；C00及全部派生检查点禁止AIC提交。
-- 第一阶段：LoveDA官方Train/Val，8类DINOv3分割，30轮。ID6 forest映射为Vegetation；
-  LoveDA没有Vehicle。
-- 第二阶段：创建9类DINOv3模型，迁移编码器、投影、细节支路、融合、细化和边界参数，
-  只重新初始化`classifier.1.weight/bias`；优化器、调度器和epoch重置，再用A00原split及
-  对应train-only权重训练60轮。
-- 新增`--init-checkpoint`与`--research-only`；research-only来源无法静默转成比赛运行，
-  普通预测入口默认拒绝研究检查点。新增`tools/prepare_loveda.py`，只整理Train/Val，
-  不读取LoveDA Test或AIC测试集。
-- 39项测试通过（1项可选OpenCV测试跳过）。尚未下载LoveDA、未训练、无结果。
-- 完整命令、类别映射、官方MD5与许可证见`docs/C00_LOVEDA_RESEARCH_GUIDE.md`。
+- 合规口径更新：参赛者报告组委会已明确允许外部有标注数据训练。原始回复由参赛者
+  保存；本记录不把用户转述冒充独立核验。早期“research-only”设计作为历史防护保留。
+- LoveDA阶段：官方Train 2522、Val 1669，8类DINOv3；最佳epoch9，验证
+  mIoU=0.552124064986218，末轮为0.5335951852498744。
+- AIC阶段：从LoveDA最佳检查点初始化9类模型，报告加载247个参数张量，只重新初始化
+  `classifier.1.weight`与`classifier.1.bias`；最佳epoch55，固定官方验证
+  mIoU=0.8147344508334126。
+- AIC阶段输出：`outputs/c00_aic_finetune`；LoveDA阶段输出：
+  `outputs/c00_loveda_pretrain`。官方测试分数尚未登记，不能只凭验证分数宣布超过B00。
+
+### C01 - LoveDA → UAVid++ → AIC顺序迁移（无卡准备完成）
+
+- 假设：C00补充了高空遥感地物先验，但低空斜视域和Vehicle仍可加强。C01在相同C00
+  LoveDA最佳起点和相同AIC微调方案之间，只增加一次UAVid++适配，从而保持可归因性。
+- 数据只采用正确的`UAVid_rgb_only.zip`和11类`UAVid++_labels.zip`；禁止混入同一420帧
+  的UAVid或UAVid+旧标签。沿用官方200/70/150序列划分，仅解码Train/Val，Test不训练。
+- 按UAVid++论文预处理为每帧8张非重叠1088×1088瓦片：1600训练、560验证；超出原图
+  的右/下填充区域标签设为ID0 Ignore。
+- 映射：clutter→Background，wall/roof→Building，road→Road，water→Water，
+  tree/low vegetation→Vegetation，dynamic/static car→Vehicle，human/sky→Ignore；
+  UAVid++无Barren或Agricultural。
+- 三阶段控制：复用C00 LoveDA `best.pt`，UAVid++阶段创建9类头并重新开始优化；随后从
+  UAVid++最佳检查点进入与C00完全相同的AIC 60轮微调。C01不是拼接数据集，也不改变
+  最终模型结构、推理或提交格式。
+- 已新增`tools/prepare_uavidplusplus.py`和独立测试。训练尚未启动；完整无卡准备、后续
+  训练验收条件见`docs/C01_UAVIDPLUSPLUS_GUIDE.md`。
