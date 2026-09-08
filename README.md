@@ -26,9 +26,9 @@
 
 ## 2. 模型方案
 
-当前官方测试集1最高分模型仍为单个 **Boundary-Aware SegFormer-B2
-（BA-SegFormer-B2）**。2026-09-07新增独立B线DINOv3候选；B线尚未正式训练，不能
-表述为已经优于A线。
+当前官方测试集1最高分模型为单个 **DINOv3 ViT-S+/16 Boundary Segmenter**：B00
+官方mIoU=0.673862，高于A00的0.669362。B01计划在相同DINOv3结构下换回A00原始
+划分，仍只使用官方数据。
 
 ### 2.1 网络结构
 
@@ -80,8 +80,14 @@ B00沿用A03 scene-guard代理划分、train-only类别权重、legacy裁剪、�
 
 实现位于`src/uavseg/model.py`，训练/恢复、验证诊断和预测脚本均可根据检查点中的
 `architecture`字段重建A线或B线模型。完整源码版本、权重哈希、服务器路径、冒烟、
-正式训练、验证和提交命令见`docs/B00_DINOV3_GUIDE.md`。正式采用前仍需向组委会确认
-LVD-1689M公开预训练权重的合规性。
+正式训练、验证和提交命令见`docs/B00_DINOV3_GUIDE.md`。B00在A03口径最佳验证
+mIoU=0.7863238948（epoch 54），完整重算完全一致；官方测试集1为0.673862。
+
+### 2.5 C线：LoveDA研究隔离路线
+
+C00研究LoveDA预适配后再用官方训练集微调。LoveDA是规则禁止的外部训练数据，因此
+C00及派生检查点不得用于AIC提交。训练入口会写入research-only标记，拒绝把这类检查点
+当普通比赛模型初始化或预测。完整流程见`docs/C00_LOVEDA_RESEARCH_GUIDE.md`。
 
 验证和测试不使用随机增强；验证使用完整 `1024x1024` 图像。
 

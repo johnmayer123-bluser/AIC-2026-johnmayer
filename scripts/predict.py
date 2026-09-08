@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--allow-research-only",
+        action="store_true",
+        help="Allow inference from a research-only checkpoint on non-competition images",
+    )
     return parser.parse_args()
 
 
@@ -39,6 +44,11 @@ def main() -> None:
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
     amp = device.type == "cuda" and not args.no_amp
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    if checkpoint.get("args", {}).get("research_only") and not args.allow_research_only:
+        raise ValueError(
+            "This checkpoint is marked research-only. It cannot be used by the normal "
+            "competition prediction path; pass --allow-research-only only for research data."
+        )
     model = model_from_config(
         checkpoint["model_config"], dinov3_source=args.dinov3_source
     )

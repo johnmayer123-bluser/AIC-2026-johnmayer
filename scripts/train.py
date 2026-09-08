@@ -32,6 +32,7 @@ from uavseg.model import (
     DinoV3BoundarySegmenter,
     model_from_config,
     parse_dinov3_blocks,
+    sha256_file,
 )
 
 
@@ -87,7 +88,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop-strategy", choices=("legacy", "targeted"), default="legacy")
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--resume", default=None)
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument("--resume", default=None)
+    checkpoint_group.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Initialize compatible model weights only; optimizer and schedule restart",
+    )
+    parser.add_argument(
+        "--research-only",
+        action="store_true",
+        help="Mark this run and its checkpoints as ineligible for competition submission",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--local-files-only",
@@ -194,6 +206,85 @@ def validate_resume_args(current: argparse.Namespace, previous: dict[str, object
         )
 
 
+def initialize_compatible_weights(
+    model: torch.nn.Module,
+    checkpoint: dict[str, object],
+) -> dict[str, object]:
+    """Load a same-architecture checkpoint while allowing only class-head resizing."""
+    if "model" not in checkpoint or "model_config" not in checkpoint:
+        raise ValueError("Initialization checkpoint lacks model/model_config")
+    source_config = checkpoint["model_config"]
+    if not isinstance(source_config, dict):
+        raise TypeError("Initialization checkpoint model_config must be a dictionary")
+    target_config = model.export_config()
+    for key in ("architecture", "variant", "feature_blocks", "decoder_channels"):
+        if key in source_config or key in target_config:
+            if source_config.get(key) != target_config.get(key):
+                raise ValueError(
+                    f"Initialization checkpoint {key} differs: "
+                    f"{source_config.get(key)!r} != {target_config.get(key)!r}"
+                )
+
+    source_state = checkpoint["model"]
+    if not isinstance(source_state, dict):
+        raise TypeError("Initialization checkpoint model must be a state_dict")
+    target_state = model.state_dict()
+    unexpected = sorted(set(source_state) - set(target_state))
+    missing = sorted(set(target_state) - set(source_state))
+    if unexpected or missing:
+        raise ValueError(
+            "Initialization checkpoint parameter names differ: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    compatible: dict[str, torch.Tensor] = {}
+    resized: list[str] = []
+    for name, value in source_state.items():
+        if target_state[name].shape == value.shape:
+            compatible[name] = value
+        elif name in {"classifier.1.weight", "classifier.1.bias"}:
+            resized.append(name)
+        else:
+            raise ValueError(
+                f"Initialization checkpoint shape mismatch for {name}: "
+                f"{tuple(value.shape)} != {tuple(target_state[name].shape)}"
+            )
+    result = model.load_state_dict(compatible, strict=False)
+    if sorted(result.missing_keys) != sorted(resized) or result.unexpected_keys:
+        raise RuntimeError(
+            "Unexpected partial initialization result: "
+            f"missing={result.missing_keys}, unexpected={result.unexpected_keys}"
+        )
+    return {
+        "loaded_parameter_tensors": len(compatible),
+        "reinitialized_parameter_tensors": sorted(resized),
+        "source_num_classes": source_config.get("num_classes"),
+        "target_num_classes": target_config.get("num_classes"),
+    }
+
+
+def build_fresh_model(args: argparse.Namespace) -> torch.nn.Module:
+    if args.architecture == "dinov3":
+        if not args.dinov3_source:
+            raise ValueError("--dinov3-source is required for a fresh DINOv3 run")
+        return DinoV3BoundarySegmenter.from_pretrained(
+            args.model,
+            dinov3_source=args.dinov3_source,
+            variant=args.dinov3_variant,
+            feature_blocks=parse_dinov3_blocks(
+                args.dinov3_blocks, args.dinov3_variant
+            ),
+            num_classes=args.num_classes,
+            decoder_channels=args.decoder_channels,
+        )
+    return BoundaryAwareSegFormer.from_pretrained(
+        args.model,
+        num_classes=args.num_classes,
+        decoder_channels=args.decoder_channels,
+        local_files_only=args.local_files_only,
+    )
+
+
 @torch.no_grad()
 def validate(
     model: torch.nn.Module,
@@ -239,6 +330,11 @@ def main() -> None:
 
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
+    if args.research_only:
+        (output / "DO_NOT_SUBMIT.txt").write_text(
+            "Research-only run. External data may have influenced this checkpoint.\n",
+            encoding="utf-8",
+        )
     (output / "config.json").write_text(
         json.dumps(vars(args), ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -282,33 +378,35 @@ def main() -> None:
     val_loader = DataLoader(val_data, batch_size=1, shuffle=False, **loader_options)
 
     checkpoint = None
+    initialization_report = None
+    initialization_sha256 = None
+    initialization_source = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         validate_resume_args(args, checkpoint.get("args", {}))
+        if checkpoint.get("args", {}).get("research_only") and not args.research_only:
+            raise ValueError("A research-only checkpoint can only resume with --research-only")
         model = model_from_config(
             checkpoint["model_config"], dinov3_source=args.dinov3_source
         )
         model.load_state_dict(checkpoint["model"])
-    elif args.architecture == "dinov3":
-        if not args.dinov3_source:
-            raise ValueError("--dinov3-source is required for a fresh DINOv3 run")
-        model = DinoV3BoundarySegmenter.from_pretrained(
-            args.model,
-            dinov3_source=args.dinov3_source,
-            variant=args.dinov3_variant,
-            feature_blocks=parse_dinov3_blocks(
-                args.dinov3_blocks, args.dinov3_variant
-            ),
-            num_classes=args.num_classes,
-            decoder_channels=args.decoder_channels,
-        )
+        initialization_report = checkpoint.get("initialization")
+        initialization_sha256 = checkpoint.get("init_checkpoint_sha256")
+        initialization_source = checkpoint.get("init_checkpoint_source")
     else:
-        model = BoundaryAwareSegFormer.from_pretrained(
-            args.model,
-            num_classes=args.num_classes,
-            decoder_channels=args.decoder_channels,
-            local_files_only=args.local_files_only,
-        )
+        model = build_fresh_model(args)
+        if args.init_checkpoint:
+            initialization = torch.load(
+                args.init_checkpoint, map_location="cpu", weights_only=False
+            )
+            if initialization.get("args", {}).get("research_only") and not args.research_only:
+                raise ValueError(
+                    "A research-only checkpoint can only initialize a --research-only run"
+                )
+            initialization_report = initialize_compatible_weights(model, initialization)
+            initialization_sha256 = sha256_file(args.init_checkpoint)
+            initialization_source = str(Path(args.init_checkpoint).expanduser().resolve())
+            print(json.dumps({"initialization": initialization_report}, ensure_ascii=False))
     checkpointing_enabled = False
     if not args.no_gradient_checkpointing:
         checkpointing_enabled = model.gradient_checkpointing_enable()
@@ -333,6 +431,10 @@ def main() -> None:
         "architecture": model.export_config().get("architecture"),
         "pretrained_sha256": getattr(model, "pretrained_sha256", None),
         "dinov3_source_revision": getattr(model, "source_revision", None),
+        "research_only": args.research_only,
+        "init_checkpoint": initialization_source,
+        "init_checkpoint_sha256": initialization_sha256,
+        "initialization": initialization_report,
     }
     (output / "runtime.json").write_text(
         json.dumps(run_info, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -430,6 +532,9 @@ def main() -> None:
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
             "args": vars(args),
+            "initialization": initialization_report,
+            "init_checkpoint_sha256": initialization_sha256,
+            "init_checkpoint_source": initialization_source,
         }
         torch.save(state, output / "last.pt")
         if float(metrics["miou"]) > best_miou:

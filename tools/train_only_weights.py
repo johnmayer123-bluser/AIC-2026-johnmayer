@@ -12,11 +12,12 @@ from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from uavseg.data import paired_samples, split_samples_from_file
 from profile_dataset import CLASS_NAMES, class_weights, mask_features
 
 
-def build(images, masks, split_path, output):
+def build(images, masks, split_path, output, num_classes=9):
     output, split_path = Path(output), Path(split_path)
     if output.exists():
         raise FileExistsError(f"Output already exists: {output}")
@@ -28,11 +29,13 @@ def build(images, masks, split_path, output):
     train, val = split_samples_from_file(paired_samples(images, masks), split_path)
     if not train:
         raise ValueError("Training split is empty")
-    total = np.zeros(9, dtype=np.int64)
+    if not 2 <= num_classes <= len(CLASS_NAMES):
+        raise ValueError(f"num_classes must be in [2,{len(CLASS_NAMES)}]")
+    total = np.zeros(num_classes, dtype=np.int64)
     per_image = []
     digest = hashlib.sha256()
     for image, mask in tqdm(train, desc="train-only mask statistics"):
-        counts = mask_features(mask, 9)
+        counts = mask_features(mask, num_classes)
         total += counts
         # Fingerprint exact training label bytes, bound to their filename stems.
         digest.update(image.stem.encode("utf-8") + b"\0")
@@ -43,7 +46,7 @@ def build(images, masks, split_path, output):
         train_count=len(train), val_count=len(val), split_sha256=hashlib.sha256(split_bytes).hexdigest(),
         training_mask_manifest_sha256=digest.hexdigest(),
         formula="1/sqrt(valid pixel frequency); normalize mean of present classes to 1; clip [0.5,3]; ignore0=0",
-        classes=CLASS_NAMES, pixel_counts=total.tolist(),
+        classes=CLASS_NAMES[:num_classes], pixel_counts=total.tolist(),
     )
     output.mkdir(parents=True)
     (output / "class_weights.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -57,8 +60,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("images", "masks", "split", "output"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--num-classes", type=int, default=9)
     args = parser.parse_args()
-    build(args.images, args.masks, args.split, args.output)
+    build(args.images, args.masks, args.split, args.output, args.num_classes)
 
 
 if __name__ == "__main__":
