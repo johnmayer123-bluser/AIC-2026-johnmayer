@@ -66,6 +66,10 @@ df -h /root/autodl-tmp
 预期验收：`frames={'train': 200, 'val': 70}`、`tiles={'train': 1600, 'val': 560}`、
 `split=1600 560`、`healthy=True`、`issues=0`、`test_labels_opened=False`。这里停止，不需要GPU。
 
+转换器先打印并核验两个整包SHA256；随后只解码Train/Val成员，ZIP读取过程会校验这些
+实际使用成员的CRC。它不额外扫描或解码Test内容，因此避免对5.9GB RGB包做一次无意义
+的重复全包读取。
+
 ## 有GPU后才执行的两阶段训练
 
 第一阶段从C00 LoveDA最佳8类检查点初始化UAVid++ 9类模型；必须看到只重置

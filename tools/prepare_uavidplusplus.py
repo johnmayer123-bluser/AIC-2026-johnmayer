@@ -226,8 +226,18 @@ def prepare(
     if not rgb_archive.is_file() or not labels_archive.is_file():
         raise FileNotFoundError("Both UAVid++ RGB and label ZIP archives are required")
 
+    print(
+        f"Hashing RGB archive: {rgb_archive} ({rgb_archive.stat().st_size} bytes)",
+        flush=True,
+    )
     rgb_sha256 = sha256_file(rgb_archive)
+    print(f"RGB archive SHA256: {rgb_sha256}", flush=True)
+    print(
+        f"Hashing label archive: {labels_archive} ({labels_archive.stat().st_size} bytes)",
+        flush=True,
+    )
     labels_sha256 = sha256_file(labels_archive)
+    print(f"Label archive SHA256: {labels_sha256}", flush=True)
     if expected_rgb_sha256 and rgb_sha256.lower() != expected_rgb_sha256.lower():
         raise ValueError(f"RGB archive SHA256 mismatch: {rgb_sha256}")
     if expected_labels_sha256 and labels_sha256.lower() != expected_labels_sha256.lower():
@@ -241,10 +251,6 @@ def prepare(
         image_output.mkdir()
         mask_output.mkdir()
         with zipfile.ZipFile(rgb_archive) as rgb_zip, zipfile.ZipFile(labels_archive) as labels_zip:
-            if rgb_zip.testzip() is not None:
-                raise ValueError("RGB archive CRC validation failed")
-            if labels_zip.testzip() is not None:
-                raise ValueError("Labels archive CRC validation failed")
             rgb_members, rgb_counts = _archive_members(rgb_zip, "Images")
             label_members, label_counts = _archive_members(labels_zip, "Labels")
             _check_expected_counts(rgb_counts, expected_counts, "RGB")
@@ -312,6 +318,10 @@ def prepare(
             "labels_archive": str(labels_archive),
             "rgb_archive_sha256": rgb_sha256,
             "labels_archive_sha256": labels_sha256,
+            "integrity_validation": (
+                "Exact whole-archive SHA256 plus CRC validation while every selected "
+                "Train/Val ZIP member is decoded"
+            ),
             "archive_member_counts": {"rgb": rgb_counts, "labels": label_counts},
             "decoded_partitions": ["train", "val"],
             "test_labels_opened": False,
